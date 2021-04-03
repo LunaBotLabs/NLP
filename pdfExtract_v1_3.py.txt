@@ -1,0 +1,316 @@
+# -------------------------------------------- #
+# -------------------------------------------- #
+# --------------- PDF CLEANER ---------------- #
+# ------------------ v.0.1 ------------------- #
+# -------------------------------------------- #
+
+
+'''
+This program generates an XLSX file
+with a TAB for each table extracted in PDF.
+'''
+
+
+# -------------------------- #
+# IMPORTS ------------------ #
+# -------------------------- #
+
+from bs4 import BeautifulSoup
+import pandas as pd
+import glob
+import os
+import fitz
+import re
+
+
+# -------------------------- #
+# USER-DEFINED PARAMETERS -- #
+# -------------------------- #
+
+fixed_columns = [
+    'report_type',
+    'portfolio_name',
+    'report_date',
+]
+
+bold_title = True
+bold_table_header = True
+bold_portfolio = True
+large_title = True
+large_portfolio = True
+pdf_cols = 3
+
+# -------------------------- #
+# LOAD PDF FILES ----------- #
+# -------------------------- #
+
+input_dir = 'pdf_files'
+os.getcwd()
+os.chdir(input_dir)
+pdf_files = glob.glob('*PDF')
+pdf_docs = []
+for pdf in pdf_files:
+    doc = fitz.Document(pdf)
+    pdf_docs.append(doc)
+
+
+# -------------------------- #
+# GET PDF PAGES ------------ #
+# -------------------------- #
+
+pdf_pages = []
+for doc in pdf_docs:
+    doc_pages = []
+    for i in range(doc.pageCount):
+        page = doc.loadPage(i)
+        doc_pages.append([i, doc, page])
+    pdf_pages.append(doc_pages)
+
+
+# -------------------------- #
+# LOAD DATA ROWS ----------- #
+# -------------------------- #
+
+for x, page in enumerate(pdf_pages):
+    print('')
+
+page = pdf_pages[0][0][1].loadPage(0)
+page_html = page.getDisplayList().getTextPage().extractHTML()
+bsoup = BeautifulSoup(page_html, 'lxml')
+pdf_rows = bsoup.find_all('p')
+soupdf = pd.DataFrame([str(x) for x in pdf_rows], columns=['row'])
+soupdf['row_text'] = [x.text for x in pdf_rows]
+
+# -------------------------- #
+# TABLE DATA FUNCTIONS ----- #
+# -------------------------- #
+
+# get xy coordinates of each table - data point
+
+# get the attributes that define each data point (bold, size, xycoords)
+class TableData:
+
+    def check_bold(self, x):
+        if '<b>' in x:
+            bold = True
+        else:
+            bold = False
+        return bold
+
+    def get_data(self, rows):
+        # rows = soupdf
+        rowx = rows.__deepcopy__()
+        rowx['bold'] = rowx.row.apply(lambda x: self.check_bold(x))
+        rowx['Size'] = rowx.row.apply(lambda x: int(x.split('font-size:')[1].split('pt')[0]))
+        rowx['ycoord'] = rowx.row.apply(lambda x: int(x.split('top:')[1].split('pt')[0]))
+        rowx['xcoord'] = rowx.row.apply(lambda x: int(x.split('left:')[1].split('pt')[0]))
+        return rowx
+
+    def data_type(self, x):
+
+        dtype = ''
+        # find doc_info
+        # find_date
+        if x.bold:
+            if x.Size > 8:
+                print(x.size)
+                print('>8')
+                if 'portfolio' in x.row_text.lower():
+                    # find_portfolio
+                    dtype = 'portfolio'
+            else:
+                # find table header
+                if '%' not in x.row_text:
+                    dtype = 'table_header'
+                else:
+                    dtype = 'subtotal_percentage'
+            # find title
+            if x.Size > 10:
+                print(x.size)
+                print('>10')
+                dtype = 'title'
+        else:
+            dtype = 'data'
+
+        # find SUBTOTAL
+        if 'SUBTOTAL' in x.row_text:
+            dtype = 'subtotal'
+
+        return dtype
+
+    def column_map(self, pdf_data):
+
+        xgroup = pdf_data.groupby('xcoord').count().sort_values(ascending=False, by='ycoord')
+        column_xlimits = xgroup[:pdf_cols].index.tolist()
+        column_xlimits.sort()
+
+        return column_xlimits
+
+    def table_row_column(self, pdf_data, column_boundaries):
+        # takes pdf_data from build_tables
+        # IN PROGRESS
+
+        pdf_data['page_column'] = None
+        pdf_data['table_index'] = None
+        pdf_data['table_column'] = None
+        pdf_data['table_header'] = None
+        pdf_data['table_xlimit'] = None
+        pdf_data['table_ylimit'] = None
+
+        for ix, xrow in pdf_data.iterrows():
+            # xrow = pdf_data.iloc[0]
+            # determine page column
+            page_column = 0
+            for x, col in enumerate(column_boundaries):
+                # col = column_boundaries[1]
+                # xrow.xcoord = 300
+                if xrow.xcoord > col:
+                    page_column = x + 1
+            # do not exceed column limit on page
+            if page_column > pdf_cols - 1:
+                page_column = pdf_cols - 1
+            pdf_data.loc[ix, 'page_column'] = page_column
+
+        # store each table
+        tables = []
+
+        # initialize values
+        table_name = None
+        table_index = 0
+        table_column = 0
+        table_row = 0
+        table_header = None
+        table_xlimit = 0
+        table_ylimit = 0
+        first_table = False
+
+        # process each columnn from top to bottom, left to right
+        # iterate through each column
+        for column in range(pdf_cols):
+            # column = 0
+            pdf_column = pdf_data[pdf_data.page_column == column]
+
+            for px, pdfx in pdf_column.iterrows():
+                # x = pdf_column.iterrows()
+                # px keeps the original index of pdf_data so it can be used to set row data
+                # px, pdfx = x.__next__()
+
+                pdf_data.loc[px, 'table_column'] = table_column
+
+                if pdfx.type == 'table_header':
+                    table_name = pdfx.row_text
+                    if first_table:
+                        table_index += 1
+                    first_table = True
+                    table_column = pdfx.ycoord
+                    table_row = px
+                    table_header = pdfx.row_text
+                    table_xlimit = pdfx.xcoord
+                    table_ylimit = pdfx.ycoord
+
+                    pdf_data.loc[px, 'table_index'] = table_index
+                    pdf_data.loc[px, 'table_header'] = table_header
+                    pdf_data.loc[px, 'table_column'] = table_column
+                    pdf_data.loc[px, 'table_xlimit'] = table_xlimit
+                    pdf_data.loc[px, 'table_ylimit'] = table_ylimit
+
+                if pdfx.type == 'data' or 'subtotal' in pdfx.type:
+                    # if pdfx.xcoord >= table_xlimit:
+                    if pdfx.ycoord >= table_ylimit:
+                        pdf_data.loc[px, 'table_index'] = table_index
+                        pdf_data.loc[px, 'table_header'] = table_header
+                        pdf_data.loc[px, 'table_column'] = table_column
+                        pdf_data.loc[px, 'table_header'] = table_header
+                        pdf_data.loc[px, 'table_xlimit'] = table_xlimit
+                        pdf_data.loc[px, 'table_ylimit'] = table_ylimit
+
+        return pdf_data
+
+    def build_tables(self, row_data):
+
+        '''
+        # base column names
+        base_columnns = ['row', 'row_text', 'Size', 'bold', 'ycoord', 'xcoord']
+        # build column names for above N, below N rows
+        reference_columns = [base_columnns[x] + f'_shift_{i}' for i in [-4, -3, -2, -1, 1, 2, 3, 4]
+                         for x in range(len(base_columnns))]
+        reference_columns = [s.replace('-', 'm') for s in reference_columns]
+        # join shifted columns with original data
+        row_data = row_data.sort_values(['ycoord', 'xcoord'] , ascending=[True, True])
+        reference_data = pd.concat([row_data.shift(i) for i in [-4, -3, -2, -1, 1, 2, 3, 4]], axis=1)
+        reference_data.columns = reference_columns
+        pdf_data = pd.concat([row_data, reference_data], axis=1)
+        '''
+
+        row_data['type'] = row_data.apply(self.data_type, axis=1)
+
+        # determine column boundaries
+        column_boundaries = self.column_map(row_data)
+
+
+        # assign to each data point: table, row, column
+        pdf_tables = self.table_row_column(row_data, column_boundaries)
+
+        return pdf_tables
+
+
+# -------------------------- #
+# TABLE DATA EXTRACTION ---- #
+# -------------------------- #
+tdat = TableData()
+rowdf = tdat.get_data(soupdf)
+rowdf.to_csv('pdf_raw_data.csv')
+rowxdf = tdat.build_tables(rowdf)
+
+typeview = rowxdf[[
+    'type',
+    'Size',
+    'bold',
+    'xcoord',
+    'ycoord',
+    'row_text',
+    'table_index',
+    'table_header',
+    'table_column',
+    'table_header',
+    'table_xlimit',
+    'table_ylimit'
+]]
+
+typeview.to_csv('pdf_tables.csv')
+
+
+ygroup = typeview.groupby(['ycoord']).row_text.apply(list)
+xgroup = typeview.groupby(['xcoord']).row_text.apply(list)
+typegroup = typeview.groupby(['type']).row_text.apply(list)
+
+# -------------------------- #
+# ALTERNATE METHODS -------- #
+# -------------------------- #
+# matrix method
+# create matrix andn populate cells
+
+'''
+import numpy as np
+table_matrix = np.chararray((max(rowdf.xcoord), max(rowdf.ycoord)), itemsize=1000)
+table_matrix[:] = 'abc'
+table_matrix.tolist()
+'''
+
+# -------------------------- #
+# UNUSED TEST CODE --------- #
+# -------------------------- #
+
+'''
+page_text = [x[4] for x in page.getTextBlocks()]
+page_coords = [x[0:4] for x in page.getTextBlocks()]
+pagedf = pd.DataFrame(page_text)
+pagedf['coordinates'] = page_coords
+pagedf['x1'] = pagedf.coordinates.apply(lambda x: x[0])
+pagedf['y1'] = pagedf.coordinates.apply(lambda x: x[1])
+pagedf['x2'] = pagedf.coordinates.apply(lambda x: x[2])
+pagedf['y2'] = pagedf.coordinates.apply(lambda x: x[3])
+'''
+
+
+
